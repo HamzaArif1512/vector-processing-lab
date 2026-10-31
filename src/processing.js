@@ -2,7 +2,7 @@ export const MODES = [
   { value: 0, label: 'Grayscale', summary: 'Weighted RGB luminance' },
   { value: 1, label: 'Color inversion', summary: 'Invert each RGB channel' },
   { value: 2, label: 'Brightness +40', summary: 'Saturating addition per channel' },
-  { value: 3, label: 'Gaussian blur', summary: 'Scalar convolution with configurable kernel' },
+  { value: 3, label: 'Gaussian blur', summary: 'Configurable Gaussian convolution · Scalar / SIMD / Workers' },
 ];
 
 function spawn() {
@@ -12,86 +12,113 @@ function spawn() {
       if (data.kind === 'ready') resolve(worker);
       if (data.kind === 'error') { worker.terminate(); reject(new Error(data.message)); }
     };
-    worker.onerror = (error) => { worker.terminate(); reject(new Error(error.message)); };
+    worker.onerror = error => { worker.terminate(); reject(new Error(error.message)); };
   });
 }
-
-function execute(worker, imageData, mode, technique) {
+function execute(worker, pixels, mode, technique, width, height) {
   return new Promise((resolve, reject) => {
-    const pixels = imageData.data ?? imageData;
     const sourceBuffer = pixels.slice().buffer;
-    const destinationBuffer = technique === 'gaussian'
-      ? new ArrayBuffer(sourceBuffer.byteLength)
-      : null;
     worker.onmessage = ({ data }) => {
       if (data.kind === 'result') resolve({ image: new Uint8ClampedArray(data.buffer), ms: data.ms });
       if (data.kind === 'error') reject(new Error(data.message));
     };
     worker.onerror = error => reject(new Error(error.message));
-    const message = {
-      kind: 'process',
-      mode,
-      technique,
-      buffer: sourceBuffer,
-      width: imageData.width,
-      height: imageData.height,
+    worker.postMessage({ kind: 'process', mode, technique, buffer: sourceBuffer, width, height }, [sourceBuffer]);
+  });
+}
+function identical(a, b) {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+function maxDifference(a, b) {
+  if (a.length !== b.length) return Infinity;
+  let delta = 0;
+  for (let i = 0; i < a.length; i++) delta = Math.max(delta, Math.abs(a[i] - b[i]));
+  return delta;
+}
+// Every worker reads a halo of radius rows, then only its owned rows are copied
+// to the final image. This also correctly handles the top and bottom borders.
+export function gaussianPartition(image, count, radius) {
+  const n = Math.min(count, image.height);
+  const rowSize = image.width * 4;
+  return Array.from({ length: n }, (_, i) => {
+    const first = Math.floor(i * image.height / n);
+    const last = Math.floor((i + 1) * image.height / n);
+    const haloFirst = Math.max(0, first - radius);
+    const haloLast = Math.min(image.height, last + radius);
+    return {
+      first, last, haloFirst, haloLast,
+      width: image.width,
+      height: haloLast - haloFirst,
+      pixels: image.data.subarray(haloFirst * rowSize, haloLast * rowSize),
     };
-    const transfer = [sourceBuffer];
-    if (destinationBuffer) {
-      message.destinationBuffer = destinationBuffer;
-      transfer.push(destinationBuffer);
-    }
-    worker.postMessage(message, transfer);
   });
 }
 
-export async function gaussianBlur(image, kernelSize = 5, sigma = 1) {
-  const worker = await spawn();
-  try {
-    const result = await execute(worker, image, {
-      kernelSize,
-      sigma,
-    }, 'gaussian');
-    return new ImageData(result.image, image.width, image.height);
-  } finally {
-    worker.terminate();
-  }
-}
-
-export async function benchmark(image, mode, workersCount = 4) {
+export async function benchmark(image, mode, workersCount = 4, options = {}) {
   const pixels = image.data;
+  const gaussian = mode === 3;
+  const config = gaussian ? {
+    kernelSize: Number(options.kernelSize ?? 5), sigma: Number(options.sigma ?? 1),
+  } : mode;
+  if (gaussian && (!Number.isInteger(config.kernelSize) || config.kernelSize < 3 || config.kernelSize > 31 || !(config.kernelSize & 1) || config.sigma < 0.5 || config.sigma > 10)) {
+    throw new Error('Invalid Gaussian kernel size or sigma');
+  }
   const runners = [];
   try {
     const single = await spawn();
     runners.push(single);
-    const scalar = await execute(single, pixels, mode, 'scalar');
-    const simd = await execute(single, pixels, mode, 'simd');
-    const n = Math.min(workersCount, Math.max(1, image.height));
+    const scalarTechnique = gaussian ? 'gaussian-scalar' : 'scalar';
+    const simdTechnique = gaussian ? 'gaussian-simd' : 'simd';
+    const scalar = await execute(single, pixels, config, scalarTechnique, image.width, image.height);
+    const simd = await execute(single, pixels, config, simdTechnique, image.width, image.height);
+    const n = Math.max(1, Math.min(Math.floor(workersCount), image.height));
     const parallelWorkers = await Promise.all(Array.from({ length: n }, () => spawn()));
     runners.push(...parallelWorkers);
     const rowSize = image.width * 4;
-    const boundaries = Array.from({length: n}, (_, i) => [
-      Math.floor(i * image.height / n) * rowSize,
-      Math.floor((i + 1) * image.height / n) * rowSize,
-    ]);
-    const start = performance.now();
-    const parts = await Promise.all(parallelWorkers.map((worker, i) => {
-      const [begin, end] = boundaries[i];
-      return execute(worker, pixels.subarray(begin, end), mode, 'scalar');
-    }));
-    const wallMs = performance.now() - start;
-    const merged = new Uint8ClampedArray(pixels.length);
-    parts.forEach((part, i) => merged.set(part.image, boundaries[i][0]));
-    const consistent = scalar.image.every((value, i) => value === simd.image[i] && value === merged[i]);
-    if (!consistent) throw new Error('Implementations disagree. Benchmark was rejected.');
+    const partition = gaussian
+      ? gaussianPartition(image, n, config.kernelSize >> 1)
+      : Array.from({ length: n }, (_, i) => {
+        const first = Math.floor(i * image.height / n), last = Math.floor((i + 1) * image.height / n);
+        return { first, last, haloFirst: first, width: image.width, height: last - first, pixels: pixels.subarray(first * rowSize, last * rowSize) };
+      });
+    async function parallel(technique) {
+      const start = performance.now();
+      const parts = await Promise.all(partition.map((part, i) =>
+        execute(parallelWorkers[i], part.pixels, config, technique, part.width, part.height)));
+      const wallMs = performance.now() - start;
+      const merged = new Uint8ClampedArray(pixels.length);
+      parts.forEach((result, i) => {
+        const part = partition[i];
+        const startRow = part.first - part.haloFirst;
+        const length = (part.last - part.first) * rowSize;
+        merged.set(result.image.subarray(startRow * rowSize, startRow * rowSize + length), part.first * rowSize);
+      });
+      return { image: merged, ms: wallMs };
+    }
+    const parallelScalar = await parallel(scalarTechnique);
+    const parallelSIMD = await parallel(simdTechnique);
+    // Floating-point SIMD arithmetic may differ by one integer intensity level.
+    const tolerance = gaussian ? 1 : 0;
+    const delta = Math.max(
+      maxDifference(scalar.image, simd.image),
+      maxDifference(scalar.image, parallelScalar.image),
+      maxDifference(scalar.image, parallelSIMD.image),
+    );
+    if (delta > tolerance) throw new Error(`Implementations disagree (maximum channel difference ${delta}).`);
     return {
       image: new ImageData(simd.image, image.width, image.height),
       results: [
-        { label: 'Scalar WASM', ms: scalar.ms, detail: 'Single worker · C scalar' },
-        { label: 'SIMD WASM', ms: simd.ms, detail: 'Single worker · SIMD128' },
-        { label: `Parallel (${n})`, ms: wallMs, detail: 'Multi-worker · includes messaging' },
+        { label: 'Scalar WASM', ms: scalar.ms, detail: 'One worker · C scalar · kernel time' },
+        { label: 'SIMD WASM', ms: simd.ms, detail: 'One worker · SIMD128 · kernel time' },
+        { label: `Parallel (${n})`, ms: parallelScalar.ms, detail: 'Scalar workers · includes message transfers' },
+        { label: `SIMD + Parallel (${n})`, ms: parallelSIMD.ms, detail: 'SIMD workers · includes message transfers' },
       ],
-      consistent,
+      consistent: true, maxChannelDifference: delta, gaussian,
     };
   } finally { runners.forEach(worker => worker.terminate()); }
+}
+
+export async function gaussianBlur(image, kernelSize = 5, sigma = 1) {
+  const result = await benchmark(image, 3, 1, { kernelSize, sigma });
+  return result.image;
 }
