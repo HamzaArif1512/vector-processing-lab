@@ -18,13 +18,24 @@ function spawn() {
 function execute(worker, pixels, mode, technique, width, height) {
   return new Promise((resolve, reject) => {
     const sourceBuffer = pixels.slice().buffer;
+    const started = performance.now();
     worker.onmessage = ({ data }) => {
-      if (data.kind === 'result') resolve({ image: new Uint8ClampedArray(data.buffer), ms: data.ms });
+      if (data.kind === 'result') {
+        resolve({
+          image: new Uint8ClampedArray(data.buffer),
+          kernelMs: data.kernelMs,
+          e2eMs: performance.now() - started,
+        });
+      }
       if (data.kind === 'error') reject(new Error(data.message));
     };
     worker.onerror = error => reject(new Error(error.message));
     worker.postMessage({ kind: 'process', mode, technique, buffer: sourceBuffer, width, height }, [sourceBuffer]);
   });
+}
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
 }
 function identical(a, b) {
   return a.length === b.length && a.every((value, i) => value === b[i]);
@@ -69,8 +80,19 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
     runners.push(single);
     const scalarTechnique = gaussian ? 'gaussian-scalar' : 'scalar';
     const simdTechnique = gaussian ? 'gaussian-simd' : 'simd';
-    const scalar = await execute(single, pixels, config, scalarTechnique, image.width, image.height);
-    const simd = await execute(single, pixels, config, simdTechnique, image.width, image.height);
+    async function singleRun(technique) {
+      const trials = [];
+      for (let trial = 0; trial < 3; trial++) {
+        trials.push(await execute(single, pixels, config, technique, image.width, image.height));
+      }
+      return {
+        image: trials[trials.length - 1].image,
+        kernelMs: median(trials.map(trial => trial.kernelMs)),
+        e2eMs: median(trials.map(trial => trial.e2eMs)),
+      };
+    }
+    const scalar = await singleRun(scalarTechnique);
+    const simd = await singleRun(simdTechnique);
     const n = Math.max(1, Math.min(Math.floor(workersCount), image.height));
     const parallelWorkers = await Promise.all(Array.from({ length: n }, () => spawn()));
     runners.push(...parallelWorkers);
@@ -82,18 +104,30 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
         return { first, last, haloFirst: first, width: image.width, height: last - first, pixels: pixels.subarray(first * rowSize, last * rowSize) };
       });
     async function parallel(technique) {
-      const start = performance.now();
-      const parts = await Promise.all(partition.map((part, i) =>
-        execute(parallelWorkers[i], part.pixels, config, technique, part.width, part.height)));
-      const wallMs = performance.now() - start;
+      const trials = [];
+      let lastParts;
+      for (let trial = 0; trial < 3; trial++) {
+        const start = performance.now();
+        const parts = await Promise.all(partition.map((part, i) =>
+          execute(parallelWorkers[i], part.pixels, config, technique, part.width, part.height)));
+        trials.push({
+          kernelMs: Math.max(...parts.map(part => part.kernelMs)),
+          e2eMs: performance.now() - start,
+        });
+        lastParts = parts;
+      }
       const merged = new Uint8ClampedArray(pixels.length);
-      parts.forEach((result, i) => {
+      lastParts.forEach((result, i) => {
         const part = partition[i];
         const startRow = part.first - part.haloFirst;
         const length = (part.last - part.first) * rowSize;
         merged.set(result.image.subarray(startRow * rowSize, startRow * rowSize + length), part.first * rowSize);
       });
-      return { image: merged, ms: wallMs };
+      return {
+        image: merged,
+        kernelMs: median(trials.map(trial => trial.kernelMs)),
+        e2eMs: median(trials.map(trial => trial.e2eMs)),
+      };
     }
     const parallelScalar = await parallel(scalarTechnique);
     const parallelSIMD = await parallel(simdTechnique);
@@ -108,10 +142,10 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
     return {
       image: new ImageData(simd.image, image.width, image.height),
       results: [
-        { label: 'Scalar WASM', ms: scalar.ms, detail: 'One worker · C scalar · kernel time' },
-        { label: 'SIMD WASM', ms: simd.ms, detail: 'One worker · SIMD128 · kernel time' },
-        { label: `Parallel (${n})`, ms: parallelScalar.ms, detail: 'Scalar workers · includes message transfers' },
-        { label: `SIMD + Parallel (${n})`, ms: parallelSIMD.ms, detail: 'SIMD workers · includes message transfers' },
+        { label: 'Scalar WASM', kernelMs: scalar.kernelMs, e2eMs: scalar.e2eMs, detail: 'One worker · C scalar' },
+        { label: 'SIMD WASM', kernelMs: simd.kernelMs, e2eMs: simd.e2eMs, detail: 'One worker · SIMD128' },
+        { label: `Parallel Scalar (${n})`, kernelMs: parallelScalar.kernelMs, e2eMs: parallelScalar.e2eMs, detail: 'Scalar workers · transfers included in end-to-end' },
+        { label: `Parallel SIMD (${n})`, kernelMs: parallelSIMD.kernelMs, e2eMs: parallelSIMD.e2eMs, detail: 'SIMD workers · transfers included in end-to-end' },
       ],
       consistent: true, maxChannelDifference: delta, gaussian,
     };

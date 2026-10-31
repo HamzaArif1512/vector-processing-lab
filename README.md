@@ -60,6 +60,14 @@ bash scripts/build-wasm.sh
 - No claim of GPU acceleration or AVX2 in the deployed browser: **WebAssembly SIMD128 is a browser-facing SIMD instruction set**, distinct from native x86 AVX2. A standalone AVX2 C++ backend would be a separate build.
 - Browser worker row processing is independent for the current per-pixel operations. A future Gaussian blur / Sobel filter needs halo rows at chunk boundaries.
 
+### Benchmark interpretation
+
+- **Scalar WASM** processes pixels with the scalar C implementation; **SIMD WASM** uses WebAssembly SIMD128 intrinsics.
+- Parallel modes distribute rows across independent Web Workers, each with its own WASM instance. SIMD + parallel combines both strategies; it is not shared-memory threading.
+- Gaussian blur workers receive halo rows around their owned rows because each output pixel depends on neighboring pixels. Only owned rows are merged back.
+- The results panel separates **kernel execution time** (the median processing time reported by workers; parallel time is the maximum concurrent worker time) from **end-to-end execution time** (dispatch, transfers, processing, and result collection).
+- Small images may be slower in parallel because worker scheduling and message transfers dominate. Browser timings also vary with CPU, system load, browser optimization, and image size.
+
 ## Suggested next milestones
 
 1. Add Gaussian blur and Sobel edge detection with border handling and chunk halo rows.
