@@ -19,7 +19,13 @@ self.onmessage = ({ data }) => {
     }
     const needed = incoming.byteLength;
     // Offset 16 keeps the source non-null and aligned, unlike offset 0.
-    const heapBase = wasm.__heap_base ? wasm.__heap_base.value : 65536;
+    if (!wasm.__heap_base) {
+      throw new Error(
+        'WASM __heap_base export missing. Rebuild filters.wasm.'
+      );
+    }
+
+    const heapBase = wasm.__heap_base.value;
 
     const srcOffset = (heapBase + 15) & ~15;
     const dstOffset = (srcOffset + needed + 15) & ~15;

@@ -133,11 +133,26 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
     const parallelSIMD = await parallel(simdTechnique);
     // Floating-point SIMD arithmetic may differ by one integer intensity level.
     const tolerance = gaussian ? 1 : 0;
-    const delta = Math.max(
-      maxDifference(scalar.image, simd.image),
-      maxDifference(scalar.image, parallelScalar.image),
-      maxDifference(scalar.image, parallelSIMD.image),
-    );
+
+    const differences = {
+      simd: maxDifference(scalar.image, simd.image),
+      parallelScalar: maxDifference(scalar.image, parallelScalar.image),
+      parallelSIMD: maxDifference(scalar.image, parallelSIMD.image),
+    };
+
+    console.table(differences);
+
+    const delta = Math.max(...Object.values(differences));
+
+    if (delta > tolerance) {
+      throw new Error(
+        `Gaussian implementations disagree: ` +
+        `SIMD=${differences.simd}, ` +
+        `Parallel Scalar=${differences.parallelScalar}, ` +
+        `Parallel SIMD=${differences.parallelSIMD}`
+      );
+    }
+
     if (delta > tolerance) throw new Error(`Implementations disagree (maximum channel difference ${delta}).`);
     return {
       image: new ImageData(simd.image, image.width, image.height),
