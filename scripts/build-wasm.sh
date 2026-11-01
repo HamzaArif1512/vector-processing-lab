@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -12,6 +11,14 @@ clang --target=wasm32 -O3 -ffp-contract=off -msimd128 -nostdlib \
   -Wl,--export=gaussian_blur_simd \
   -Wl,--export=sobel_scalar \
   -Wl,--export=sobel_simd \
+  -Wl,--export=median_filter_scalar \
+  -Wl,--export=median_filter_simd \
+  -Wl,--export=histogram_count_scalar \
+  -Wl,--export=histogram_count_simd \
+  -Wl,--export=histogram_apply_scalar \
+  -Wl,--export=histogram_apply_simd \
+  -Wl,--export=brightness_custom_scalar \
+  -Wl,--export=brightness_custom_simd \
   -Wl,--export=__heap_base \
   -Wl,--export-memory \
   -Wl,--initial-memory=131072 \
