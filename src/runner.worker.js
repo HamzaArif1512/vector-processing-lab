@@ -10,7 +10,7 @@ load().catch(error => postMessage({ kind: 'error', message: error.message }));
 
 // Specialized two-stage histogram requests. The same WASM instance is reused.
 async function histogramRequest(data){
-  const {kind,buffer,simd,lut,repetitions=7}=data;
+  const {kind,buffer,simd,lut,repetitions=7,warmups=1}=data;
   const incoming=new Uint8Array(buffer);
   if(incoming.length===0||incoming.length%4)throw new Error('Invalid histogram RGBA buffer');
   if(!wasm.__heap_base)throw new Error('WASM heap base missing');
@@ -33,7 +33,7 @@ async function histogramRequest(data){
     if(kind==='histogram-count')countFn(src,incoming.length/4,aux);
     else applyFn(src,dst,incoming.length/4,aux);
   };
-  run();
+  for(let i=0;i<warmups;i++)run();
   const times=[];
   for(let i=0;i<repetitions;i++){
     const start=performance.now();run();times.push(performance.now()-start);
@@ -42,7 +42,7 @@ async function histogramRequest(data){
   const output=kind==='histogram-count'
     ?new Uint8Array(wasm.memory.buffer,aux,1024).slice().buffer
     :dstBytes.slice().buffer;
-  postMessage({kind:'result',buffer:output,kernelMs:times[Math.floor(times.length/2)]},[output]);
+  postMessage({kind:'result',buffer:output,kernelMs:times[Math.floor(times.length/2)],times},[output]);
 }
 
 self.onmessage = ({ data }) => {
@@ -53,7 +53,7 @@ self.onmessage = ({ data }) => {
   }
   if (!wasm || data.kind !== 'process') return;
   try {
-    const { buffer, mode, technique, width, height, repetitions = 7 } = data;
+    const { buffer, mode, technique, width, height, repetitions = 7, warmups = 1 } = data;
     const incoming = new Uint8Array(buffer);
     const gaussian = technique === 'gaussian-scalar' || technique === 'gaussian-simd';
     const sobel = technique === 'sobel-scalar' || technique === 'sobel-simd';
@@ -94,7 +94,7 @@ self.onmessage = ({ data }) => {
       else if (brightness) fn(srcOffset, needed / 4, mode.amount);
       else fn(srcOffset, needed / 4, mode);
     };
-    warmup();
+    for(let i=0;i<warmups;i++)warmup();
     const times = [];
     for (let i = 0; i < repetitions; i++) {
       bytes.set(incoming);
