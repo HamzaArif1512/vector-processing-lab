@@ -16,7 +16,7 @@ export const PROFILES={
 export function buildPlan({modes=[0,3,5],gaussianKernels=[5],medianKernels=[3],sigma=1.5,brightness=40,resolutions=[480],workers=[4]}={}){
   const jobs=[];
   for(const resolution of resolutions){
-    if(![320,480,720,960,1280].includes(Number(resolution)))throw Error('Unsupported resolution');
+    if(![320,480,720,960,1280,1800].includes(Number(resolution)))throw Error('Unsupported resolution');
     for(const mode of modes){
       if(!Number.isInteger(mode)||mode<0||mode>6)throw Error('Unsupported operation');
       const configurations=mode===3?gaussianKernels.map(kernelSize=>({kernelSize,sigma}))

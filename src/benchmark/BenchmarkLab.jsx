@@ -9,6 +9,7 @@ const formatMs=v=>v==null?'—':v>=1000?`${(v/1000).toFixed(2)} s`:`${v.toFixed(
 const formatFactor=v=>v&&Number.isFinite(v)?`${v.toFixed(2)}×`:'—';
 function LabelCheck({value,selected,onChange,children}){return <label className={`bench-check ${selected?'selected':''}`}><input type="checkbox" checked={selected} onChange={()=>onChange(value)}/>{children}</label>;}
 function resizeImage(image,maxEdge){
+  if(Math.max(image.width,image.height)<=maxEdge)return image;
   const f=Math.min(1,maxEdge/Math.max(image.width,image.height)),w=Math.max(1,Math.floor(image.width*f)),h=Math.max(1,Math.floor(image.height*f));
   const original=document.createElement('canvas');original.width=image.width;original.height=image.height;original.getContext('2d').putImageData(image,0,0);
   const scaled=document.createElement('canvas');scaled.width=w;scaled.height=h;scaled.getContext('2d').drawImage(original,0,0,w,h);
@@ -151,8 +152,8 @@ export default function BenchmarkLab({source,sourceName}){
         {modes.includes(2)&&<div><label className="bench-field-title">Brightness · {brightness>0?'+':''}{brightness}</label><input type="range" min="-100" max="100" step="5" value={brightness} onChange={e=>setBrightness(Number(e.target.value))}/></div>}
       </div>}
       <div className="bench-divider"/>
-      <label className="bench-field-title">Maximum image edge</label><div className="bench-option-row">{[320,480,720,960,1280].map(v=><LabelCheck key={v} value={v} selected={resolutions.includes(v)} onChange={x=>setResolutions(arrayToggle(resolutions,x))}>{v}px</LabelCheck>)}</div>
-      <p className="bench-help">Images are downscaled only, never enlarged. Image resizing is outside timed computation.</p>
+      <label className="bench-field-title">Maximum image edge</label><p className="bench-help">Source: {source?.width} × {source?.height} px. Every result records the effective processed dimensions.</p><div className="bench-option-row">{[320,480,720,960,1280,1800].map(v=><LabelCheck key={v} value={v} selected={resolutions.includes(v)} onChange={x=>setResolutions(arrayToggle(resolutions,x))}>{v}px</LabelCheck>)}</div>
+      <p className="bench-help">Images are downscaled only, never enlarged. 1800px preserves full resolution for images uploaded at or below the Studio upload limit. Resizing and noise generation are excluded from timed processing.</p>
       <label className="bench-field-title">Parallel workers</label><div className="bench-option-row">{[2,4,6,8].map(v=><LabelCheck key={v} value={v} selected={workers.includes(v)} onChange={x=>setWorkers(arrayToggle(workers,x))}>{v}</LabelCheck>)}</div>
       <div className="bench-divider"/>
       <div className="bench-section-header"><ImageIcon size={18}/><h3>Noise injection</h3><small>02 / INPUT</small></div>

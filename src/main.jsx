@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { UploadCloud, Zap, Cpu, Layers, Image as ImageIcon, Download, CheckCircle2, AlertTriangle, RefreshCw, Github, ArrowRight, Activity } from 'lucide-react';
-import { benchmark, MODES } from './processing';
+import { MODES } from './processing';
+import { runStudio, Cancelled } from './benchmark/engine.js';
 import './styles.css';
 import BenchmarkLab from './benchmark/BenchmarkLab.jsx';
 
@@ -35,12 +36,17 @@ function App() {
   const [timing,setTiming]=useState('kernelMs');
   const [results,setResults]=useState(null);
   const [running,setRunning]=useState(false);
+  const [studioProfile,setStudioProfile]=useState('quick');
+  const [studioProgress,setStudioProgress]=useState('');
+  const [previewImage,setPreviewImage]=useState(null);
+  const studioAbort=useRef(null);
+  useEffect(()=>()=>studioAbort.current?.abort(),[]);
   const [error,setError]=useState('');
   const original=useRef(null), output=useRef(null), fileInput=useRef(null);
   const setFromCanvas=useCallback((canvas,name)=>{
     const ctx=canvas.getContext('2d',{willReadFrequently:true});
     const image=ctx.getImageData(0,0,canvas.width,canvas.height);
-    setSource(image);setSourceName(name);setResults(null);setError('');
+    studioAbort.current?.abort();setSource(image);setSourceName(name);setResults(null);setPreviewImage(null);setError('');
   },[]);
   useEffect(()=>{setFromCanvas(makeDemo(),'demo-landscape.png')},[setFromCanvas]);
   useEffect(()=>{
@@ -63,19 +69,18 @@ function App() {
   };
   const run=async()=>{
     if(!source||running)return;
-    setRunning(true);setError('');    setResults(null);
+    const abort=new AbortController();studioAbort.current=abort;
+    setRunning(true);setError('');setResults(null);setPreviewImage(null);setStudioProgress('Preparing image processing…');
     await new Promise(resolve=>setTimeout(resolve,30));
-    try {
-      const response=await benchmark(
-        source,
-        mode,
-        threads,
-        mode === 3 ? { kernelSize, sigma } : mode === 5 ? { kernelSize: medianSize } : mode === 2 ? { amount: brightness } : undefined,
-      );
-      setResults(response);
-    }
-    catch(err){setError(err.message)}finally{setRunning(false)}
+    try{
+      const parameters=mode===3?{kernelSize,sigma}:mode===5?{kernelSize:medianSize}:mode===2?{amount:brightness}:{};
+      const response=await runStudio({image:source,mode,parameters,workers:threads,profile:studioProfile,
+        signal:abort.signal,onProgress:setStudioProgress,onPreview:setPreviewImage});
+      if(!abort.signal.aborted)setResults(response);
+    }catch(err){if(err instanceof Cancelled||err.name==='AbortError')setStudioProgress('Cancelled.');else setError(err.message);}
+    finally{if(studioAbort.current===abort){studioAbort.current=null;setRunning(false);}}
   };
+  const cancelStudio=()=>{studioAbort.current?.abort();setStudioProgress('Cancelling active workers…');};
   // useEffect(()=>{if(results&&output.current){output.current.width=results.image.width;output.current.height=results.image.height;output.current.getContext('2d').putImageData(results.image,0,0)}},[results]);
   
 useEffect(() => {
@@ -118,6 +123,12 @@ useEffect(() => {
 
 }, [results,workspace]);
 
+  useEffect(()=>{
+    if(!previewImage||results||!output.current)return;
+    const canvas=output.current;
+    canvas.width=previewImage.width;canvas.height=previewImage.height;
+    canvas.getContext('2d').putImageData(previewImage,0,0);
+  },[previewImage,results]);
   const download=()=>{if(!output.current||!results)return;const link=document.createElement('a');link.download='vectorlab-processed.png';link.href=output.current.toDataURL('image/png');link.click()};
   const timingLabel = timing === 'kernelMs' ? 'Kernel execution time' : 'End-to-end execution time';
   const measured = result => result?.[timing] ?? 0;
@@ -128,12 +139,12 @@ useEffect(() => {
       <div className="lab-nav" role="tablist" aria-label="VectorLab workspaces"><button role="tab" aria-selected={workspace==='studio'} className={workspace==='studio'?'active':''} onClick={()=>setWorkspace('studio')}><ImageIcon size={16}/> Image Studio</button><button role="tab" aria-selected={workspace==='lab'} className={workspace==='lab'?'active':''} onClick={()=>setWorkspace('lab')}><Activity size={16}/> Benchmark Lab</button></div>
       {workspace==='studio' ? <>
       <div className="layout"><section className="workspace"><div className="sectionhead"><div><div className="sectiontag">01 / INPUT & OUTPUT</div><h2>Image workspace</h2></div><button className="secondary" onClick={()=>fileInput.current?.click()}><UploadCloud size={16}/> Upload image</button><input ref={fileInput} type="file" accept="image/*" hidden onChange={handleFile}/></div>
-        <div className="imagegrid"><div className="imagecard"><div className="imghead"><span>ORIGINAL</span><span className="muted">{source?.width} × {source?.height}</span></div><div className="canvaswrap"><canvas ref={original}/></div><div className="imgfoot"><ImageIcon size={14}/><span title={sourceName}>{sourceName}</span></div></div><div className="imagecard"><div className="imghead"><span>PROCESSED</span><span className="processed-tag">{results?MODES[mode].label:'Awaiting run'}</span></div><div className="canvaswrap"><canvas ref={output}/>{!results&&<div className="placeholder"><Zap size={23}/><span>Ready to process</span></div>}</div><div className="imgfoot"><span>{results?(mode===3?'Blur rendered with selected parameters':mode===4?'Sobel edges rendered (fixed 3×3)':'Output rendered by the selected filter'):'The output will appear here'}</span><button className="icon-btn" disabled={!results} onClick={download} title="Save processed PNG"><Download size={16}/></button></div></div></div>
-        <div className="controls"><div className="control-title"><div className="sectiontag">02 / CONFIGURATION</div><h2>Experiment settings</h2></div><div className="control-row"><label>Image operation<select value={mode} onChange={e=>{setMode(Number(e.target.value));setResults(null)}}>{MODES.map(x=><option value={x.value} key={x.value}>{x.label}</option>)}</select><small>{MODES[mode].summary}</small></label>
+        <div className="imagegrid"><div className="imagecard"><div className="imghead"><span>ORIGINAL</span><span className="muted">{source?.width} × {source?.height}</span></div><div className="canvaswrap"><canvas ref={original}/></div><div className="imgfoot"><ImageIcon size={14}/><span title={sourceName}>{sourceName}</span></div></div><div className="imagecard"><div className="imghead"><span>PROCESSED</span><span className="processed-tag">{results?MODES[mode].label:previewImage?'Preview · verifying strategies':'Awaiting run'}</span></div><div className="canvaswrap"><canvas ref={output}/>{!results&&!previewImage&&<div className="placeholder"><Zap size={23}/><span>Ready to process</span></div>}</div><div className="imgfoot"><span>{results?`Verified · ${results.actualWidth} × ${results.actualHeight} px · ${results.studioProfile}`:previewImage?'Preview ready · measuring remaining strategies': 'The output will appear here'}</span><button className="icon-btn" disabled={!results} onClick={download} title="Save processed PNG"><Download size={16}/></button></div></div></div>
+        <div className="controls"><div className="control-title"><div className="sectiontag">02 / CONFIGURATION</div><h2>Experiment settings</h2></div><div className="control-row"><label>Image operation<select value={mode} onChange={e=>{setMode(Number(e.target.value));setResults(null);setPreviewImage(null)}}>{MODES.map(x=><option value={x.value} key={x.value}>{x.label}</option>)}</select><small>{MODES[mode].summary}</small></label>
     {mode === 5 && <label>Median kernel size<select value={medianSize} onChange={e=>{setMedianSize(Number(e.target.value));setResults(null)}}>{[3,5,7].map(k=><option value={k} key={k}>{k} × {k}</option>)}</select><small>Odd window · independent RGB medians</small></label>}
     {mode === 2 && <label>Brightness ({brightness > 0 ? '+' : ''}{brightness})<input type="range" min="-100" max="100" step="5" value={brightness} onChange={e=>{setBrightness(Number(e.target.value));setResults(null)}}/><small>Negative darkens · positive brightens</small></label>}
-    {mode === 3 && <label>Kernel size<select value={kernelSize} onChange={e=>{setKernelSize(Number(e.target.value));setResults(null)}}>{[3,5,7,9,11,13,15,17,19,21,23,25,27,29,31].map(size=><option value={size} key={size}>{size} × {size}</option>)}</select><small>Odd-sized convolution window</small></label>}</div>{mode === 3 && <div className="control-row filter-row"><label>Sigma<input type="range" min="0.5" max="10" step="0.5" value={sigma} onChange={e=>{setSigma(Number(e.target.value));setResults(null)}}/><small>{sigma.toFixed(1)} · blur radius</small></label><label>Parallel workers<select value={threads} onChange={e=>{setThreads(Number(e.target.value));setResults(null)}}>{[2,4,6,8].map(n=><option key={n} value={n}>{n} workers</option>)}</select><small>Workers used for scalar and SIMD runs</small></label></div>}{mode !== 3 && <div className="control-row"><label>Parallel workers<select value={threads} onChange={e=>{setThreads(Number(e.target.value));setResults(null)}}>{[2,4,6,8].map(n=><option key={n} value={n}>{n} workers</option>)}</select><small>Number of simultaneous browser workers</small></label></div>}<button className="run" onClick={run} disabled={running||!source}>{running?<><RefreshCw className="spin" size={18}/> Running benchmark...</>:<><Zap size={18} fill="currentColor"/> Run benchmark <ArrowRight size={18}/></>}</button>{error&&<div className="error"><AlertTriangle size={16}/>{error}</div>}</div>
-      </section><aside className="insights"><div className="sectionhead"><div><div className="sectiontag">03 / PERFORMANCE</div><h2>Benchmark results</h2></div><Activity size={19} className="subtle"/></div><div className="benchmark-box">{results?<><label className="timing-select">Timing methodology<select value={timing} onChange={e=>setTiming(e.target.value)}><option value="kernelMs">Kernel execution time</option><option value="e2eMs">End-to-end execution time</option></select></label><div className="leader"><span>FASTEST MODE · {timingLabel}</span><strong>{results.results.find(x=>measured(x)===fastest)?.label}</strong><small>{fastest.toFixed(3)} ms measured</small></div><div className="bars">{results.results.map((result,i)=><div className="baritem" key={i}><div className="barlabel"><strong>{result.label}</strong><span>{measured(result).toFixed(3)} ms</span></div><div className="track"><div className={measured(result)===fastest?'fill best':'fill'} style={{width:`${Math.max(2,100*measured(result)/Math.max(...results.results.map(measured)))}%`}}/></div><small>{result.detail}</small></div>)}</div><div className="speedup"><span>SIMD vs Scalar</span><strong>{(measured(results.results[0])/measured(results.results[1])).toFixed(2)}×</strong><span>Parallel Scalar vs Scalar</span><strong>{(measured(results.results[0])/measured(results.results[2])).toFixed(2)}×</strong><span>Parallel SIMD vs Scalar</span><strong>{(measured(results.results[0])/measured(results.results[3])).toFixed(2)}×</strong></div><div className="verified"><CheckCircle2 size={16}/> Correctness verified · maximum channel difference: {results.maxChannelDifference ?? 0}</div></>:<div className="empty-state"><div className="empty-icon"><Activity size={29}/></div><strong>No benchmark data yet</strong><p>Run the experiment to compare execution times and verify output correctness.</p><div className="emptyskeleton"/><div className="emptyskeleton short"/><div className="emptyskeleton"/></div>}</div><div className="method"><div className="sectiontag">HOW IT WORKS</div><div className="methodrow"><span>01</span><div><strong>Scalar WASM</strong><p>Processes one pixel at a time using compiled C.</p></div></div><div className="methodrow"><span>02</span><div><strong>SIMD WASM</strong><p>Uses 128-bit vectors, processing four RGBA pixels per iteration.</p></div></div><div className="methodrow"><span>03</span><div><strong>Parallel workers</strong><p>Splits image rows across multiple workers running scalar WASM.</p></div></div></div></aside></div>
+    {mode === 3 && <label>Kernel size<select value={kernelSize} onChange={e=>{setKernelSize(Number(e.target.value));setResults(null)}}>{[3,5,7,9,11,13,15,17,19,21,23,25,27,29,31].map(size=><option value={size} key={size}>{size} × {size}</option>)}</select><small>Odd-sized convolution window</small></label>}</div>{mode === 3 && <div className="control-row filter-row"><label>Sigma<input type="range" min="0.5" max="10" step="0.5" value={sigma} onChange={e=>{setSigma(Number(e.target.value));setResults(null)}}/><small>{sigma.toFixed(1)} · blur radius</small></label><label>Parallel workers<select value={threads} onChange={e=>{setThreads(Number(e.target.value));setResults(null)}}>{[2,4,6,8].map(n=><option key={n} value={n}>{n} workers</option>)}</select><small>Workers used for scalar and SIMD runs</small></label></div>}{mode !== 3 && <div className="control-row"><label>Parallel workers<select value={threads} onChange={e=>{setThreads(Number(e.target.value));setResults(null)}}>{[2,4,6,8].map(n=><option key={n} value={n}>{n} workers</option>)}</select><small>Number of simultaneous browser workers</small></label></div>}<div className="studio-benchmark-settings"><label>Execution policy<select value={studioProfile} disabled={running} onChange={e=>setStudioProfile(e.target.value)}><option value="quick">Quick preview · 1 measurement / strategy</option><option value="full">Detailed comparison · 3 measurements / strategy</option></select></label><small>Both policies use Benchmark Lab's worker engine. Preview is rendered after the first SIMD result; verified timings appear after all four strategies finish.</small></div>{running&&<div className="studio-progress" role="status"><RefreshCw className="spin" size={15}/><span>{studioProgress}</span><button type="button" className="secondary" onClick={cancelStudio}>Cancel</button></div>}<button className="run" onClick={run} disabled={running||!source}>{running?<><RefreshCw className="spin" size={18}/> Processing & verifying...</>:<><Zap size={18} fill="currentColor"/> Run benchmark <ArrowRight size={18}/></>}</button>{!running&&studioProgress&&<p className="studio-note">{studioProgress}</p>}{error&&<div className="error"><AlertTriangle size={16}/>{error}</div>}</div>
+      </section><aside className="insights"><div className="sectionhead"><div><div className="sectiontag">03 / PERFORMANCE</div><h2>Benchmark results</h2></div><Activity size={19} className="subtle"/></div><div className="benchmark-box">{results?<><p className="studio-note">{results.actualWidth} × {results.actualHeight} px · {results.results[0].samples} sample(s) per strategy · {results.totalElapsedMs>=1000?(results.totalElapsedMs/1000).toFixed(2)+" s":results.totalElapsedMs.toFixed(0)+" ms"} elapsed. Kernel excludes communication; wall time includes transfers and coordination but excludes worker initialization.</p><label className="timing-select">Timing methodology<select value={timing} onChange={e=>setTiming(e.target.value)}><option value="kernelMs">Kernel execution time</option><option value="e2eMs">End-to-end execution time</option></select></label><div className="leader"><span>FASTEST MODE · {timingLabel}</span><strong>{results.results.find(x=>measured(x)===fastest)?.label}</strong><small>{fastest.toFixed(3)} ms measured</small></div><div className="bars">{results.results.map((result,i)=><div className="baritem" key={i}><div className="barlabel"><strong>{result.label}</strong><span>{measured(result).toFixed(3)} ms</span></div><div className="track"><div className={measured(result)===fastest?'fill best':'fill'} style={{width:`${Math.max(2,100*measured(result)/Math.max(...results.results.map(measured)))}%`}}/></div><small>{result.detail}</small></div>)}</div><div className="speedup"><span>SIMD vs Scalar</span><strong>{(measured(results.results[0])/measured(results.results[1])).toFixed(2)}×</strong><span>Parallel Scalar vs Scalar</span><strong>{(measured(results.results[0])/measured(results.results[2])).toFixed(2)}×</strong><span>Parallel SIMD vs Scalar</span><strong>{(measured(results.results[0])/measured(results.results[3])).toFixed(2)}×</strong></div><div className="verified"><CheckCircle2 size={16}/> Correctness verified · maximum channel difference: {results.maxChannelDifference ?? 0}</div></>:<div className="empty-state"><div className="empty-icon"><Activity size={29}/></div><strong>No benchmark data yet</strong><p>Run the experiment to compare execution times and verify output correctness.</p><div className="emptyskeleton"/><div className="emptyskeleton short"/><div className="emptyskeleton"/></div>}</div><div className="method"><div className="sectiontag">HOW IT WORKS</div><div className="methodrow"><span>01</span><div><strong>Scalar WASM</strong><p>Processes one pixel at a time using compiled C.</p></div></div><div className="methodrow"><span>02</span><div><strong>SIMD WASM</strong><p>Uses 128-bit vectors, processing four RGBA pixels per iteration.</p></div></div><div className="methodrow"><span>03</span><div><strong>Parallel workers</strong><p>Splits image rows across multiple workers running scalar WASM.</p></div></div></div></aside></div>
       </> : <BenchmarkLab source={source} sourceName={sourceName}/>}
       <footer><span>VECTORLAB / BROWSER-BASED PARALLEL IMAGE PROCESSING</span><span>Benchmarks are device-dependent · Parallel timing includes message transfer overhead</span></footer>
     </main></div>
