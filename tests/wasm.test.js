@@ -71,19 +71,65 @@ for (const workers of [1, 2, 4, 6, 8]) {
     assert.ok(max<=1,`halo mismatch: ${max}`);
   });
 }
-test('Halo-row partition yields same Gaussian output',()=>{
-  const w=17,h=23,k=9,sigma=2,workers=4,r=k>>1,row=w*4;
-  const input=new Uint8Array(w*h*4);
-  for(let i=0;i<input.length;i++)input[i]=(i*37+11)%256;
-  const baseline=blur(input,w,h,k,sigma,false),merged=new Uint8Array(input.length);
-  for(let i=0;i<workers;i++){
-    const first=Math.floor(i*h/workers),last=Math.floor((i+1)*h/workers);
-    const haloFirst=Math.max(0,first-r),haloLast=Math.min(h,last+r);
-    const sub=input.subarray(haloFirst*row,haloLast*row);
-    const result=blur(sub,w,haloLast-haloFirst,k,sigma,true);
-    const start=(first-haloFirst)*row;
-    merged.set(result.subarray(start,start+(last-first)*row),first*row);
+test('Halo-row partition yields same Gaussian output', () => {
+  const w = 17;
+  const h = 23;
+  const k = 9;
+  const sigma = 2;
+  const workers = 4;
+
+  const r = k >> 1;
+  const row = w * 4;
+
+  const input = new Uint8Array(w * h * 4);
+
+  for (let i = 0; i < input.length; i++) {
+    input[i] = (i * 37 + 11) % 256;
   }
-  let max=0;for(let i=0;i<merged.length;i++)max=Math.max(max,Math.abs(merged[i]-baseline[i]));
-  assert.ok(max<=1,`halo mismatch: ${max}`);
+
+  // Extract the actual output array, not the blur() result object.
+  const baseline = blur(input, w, h, k, sigma, false).output;
+
+  const merged = new Uint8Array(input.length);
+
+  for (let i = 0; i < workers; i++) {
+    const first = Math.floor(i * h / workers);
+    const last = Math.floor((i + 1) * h / workers);
+
+    const haloFirst = Math.max(0, first - r);
+    const haloLast = Math.min(h, last + r);
+
+    const sub = input.subarray(
+      haloFirst * row,
+      haloLast * row
+    );
+
+    // Extract the partition's output array.
+    const result = blur(
+      sub,
+      w,
+      haloLast - haloFirst,
+      k,
+      sigma,
+      true
+    ).output;
+
+    const start = (first - haloFirst) * row;
+
+    merged.set(
+      result.subarray(start, start + (last - first) * row),
+      first * row
+    );
+  }
+
+  let max = 0;
+
+  for (let i = 0; i < merged.length; i++) {
+    max = Math.max(
+      max,
+      Math.abs(merged[i] - baseline[i])
+    );
+  }
+
+  assert.ok(max <= 1, `halo mismatch: ${max}`);
 });
