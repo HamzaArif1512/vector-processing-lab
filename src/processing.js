@@ -123,6 +123,40 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
         const length = (part.last - part.first) * rowSize;
         merged.set(result.image.subarray(startRow * rowSize, startRow * rowSize + length), part.first * rowSize);
       });
+
+      let changedPixels = 0;
+      let maxChange = 0;
+      let totalChange = 0;
+
+      for (let i = 0; i < pixels.length; i += 4) {
+        let changed = false;
+
+        for (let c = 0; c < 3; c++) {
+          const difference = Math.abs(
+            pixels[i + c] - simd.image[i + c]
+          );
+
+          if (difference > 0) changed = true;
+          maxChange = Math.max(maxChange, difference);
+          totalChange += difference;
+        }
+
+        if (changed) changedPixels++;
+      }
+
+      console.table({
+        kernelSize: config.kernelSize,
+        sigma: config.sigma,
+        totalPixels: image.width * image.height,
+        changedPixels,
+        changedPercentage:
+          (100 * changedPixels / (image.width * image.height)).toFixed(2) + "%",
+        maximumPixelChange: maxChange,
+        averageChannelChange:
+          (totalChange / (image.width * image.height * 3)).toFixed(2),
+      });
+
+
       return {
         image: merged,
         kernelMs: median(trials.map(trial => trial.kernelMs)),

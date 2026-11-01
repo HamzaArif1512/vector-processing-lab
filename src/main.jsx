@@ -72,7 +72,48 @@ function App() {
     }
     catch(err){setError(err.message)}finally{setRunning(false)}
   };
-  useEffect(()=>{if(results&&output.current){output.current.width=results.image.width;output.current.height=results.image.height;output.current.getContext('2d').putImageData(results.image,0,0)}},[results]);
+  // useEffect(()=>{if(results&&output.current){output.current.width=results.image.width;output.current.height=results.image.height;output.current.getContext('2d').putImageData(results.image,0,0)}},[results]);
+  
+useEffect(() => {
+  if (!results || !output.current) return;
+
+  const canvas = output.current;
+  const ctx = canvas.getContext('2d');
+
+  // Set the canvas dimensions.
+  canvas.width = results.image.width;
+  canvas.height = results.image.height;
+
+  // Draw the processed image.
+  ctx.putImageData(results.image, 0, 0);
+
+  // Verify that the processed image was drawn.
+  const displayedImage = ctx.getImageData(
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+  let maxDifference = 0;
+
+  for (let i = 0; i < displayedImage.data.length; i++) {
+    maxDifference = Math.max(
+      maxDifference,
+      Math.abs(
+        displayedImage.data[i] - results.image.data[i]
+      )
+    );
+  }
+
+  console.log("Canvas rendering diagnostic:", {
+    width: canvas.width,
+    height: canvas.height,
+    maxRenderingDifference: maxDifference
+  });
+
+}, [results]);
+
   const download=()=>{if(!output.current||!results)return;const link=document.createElement('a');link.download='vectorlab-processed.png';link.href=output.current.toDataURL('image/png');link.click()};
   const timingLabel = timing === 'kernelMs' ? 'Kernel execution time' : 'End-to-end execution time';
   const measured = result => result?.[timing] ?? 0;
