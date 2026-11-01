@@ -3,6 +3,7 @@ export const MODES = [
   { value: 1, label: 'Color inversion', summary: 'Invert each RGB channel' },
   { value: 2, label: 'Brightness +40', summary: 'Saturating addition per channel' },
   { value: 3, label: 'Gaussian blur', summary: 'Configurable Gaussian convolution · Scalar / SIMD / Workers' },
+  { value: 4, label: 'Sobel edge detection', summary: 'Fixed 3×3 grayscale edge detector · Scalar / SIMD / Workers' },
 ];
 
 function spawn() {
@@ -68,6 +69,7 @@ export function gaussianPartition(image, count, radius) {
 export async function benchmark(image, mode, workersCount = 4, options = {}) {
   const pixels = image.data;
   const gaussian = mode === 3;
+  const sobel = mode === 4;
   const config = gaussian ? {
     kernelSize: Number(options.kernelSize ?? 5), sigma: Number(options.sigma ?? 1),
   } : mode;
@@ -78,8 +80,8 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
   try {
     const single = await spawn();
     runners.push(single);
-    const scalarTechnique = gaussian ? 'gaussian-scalar' : 'scalar';
-    const simdTechnique = gaussian ? 'gaussian-simd' : 'simd';
+    const scalarTechnique = gaussian ? 'gaussian-scalar' : sobel ? 'sobel-scalar' : 'scalar';
+    const simdTechnique = gaussian ? 'gaussian-simd' : sobel ? 'sobel-simd' : 'simd';
     async function singleRun(technique) {
       const trials = [];
       for (let trial = 0; trial < 3; trial++) {
@@ -97,8 +99,8 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
     const parallelWorkers = await Promise.all(Array.from({ length: n }, () => spawn()));
     runners.push(...parallelWorkers);
     const rowSize = image.width * 4;
-    const partition = gaussian
-      ? gaussianPartition(image, n, config.kernelSize >> 1)
+    const partition = (gaussian || sobel)
+      ? gaussianPartition(image, n, gaussian ? config.kernelSize >> 1 : 1)
       : Array.from({ length: n }, (_, i) => {
         const first = Math.floor(i * image.height / n), last = Math.floor((i + 1) * image.height / n);
         return { first, last, haloFirst: first, width: image.width, height: last - first, pixels: pixels.subarray(first * rowSize, last * rowSize) };
@@ -124,39 +126,6 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
         merged.set(result.image.subarray(startRow * rowSize, startRow * rowSize + length), part.first * rowSize);
       });
 
-      let changedPixels = 0;
-      let maxChange = 0;
-      let totalChange = 0;
-
-      for (let i = 0; i < pixels.length; i += 4) {
-        let changed = false;
-
-        for (let c = 0; c < 3; c++) {
-          const difference = Math.abs(
-            pixels[i + c] - simd.image[i + c]
-          );
-
-          if (difference > 0) changed = true;
-          maxChange = Math.max(maxChange, difference);
-          totalChange += difference;
-        }
-
-        if (changed) changedPixels++;
-      }
-
-      console.table({
-        kernelSize: config.kernelSize,
-        sigma: config.sigma,
-        totalPixels: image.width * image.height,
-        changedPixels,
-        changedPercentage:
-          (100 * changedPixels / (image.width * image.height)).toFixed(2) + "%",
-        maximumPixelChange: maxChange,
-        averageChannelChange:
-          (totalChange / (image.width * image.height * 3)).toFixed(2),
-      });
-
-
       return {
         image: merged,
         kernelMs: median(trials.map(trial => trial.kernelMs)),
@@ -180,14 +149,13 @@ export async function benchmark(image, mode, workersCount = 4, options = {}) {
 
     if (delta > tolerance) {
       throw new Error(
-        `Gaussian implementations disagree: ` +
+        `Implementations disagree: ` +
         `SIMD=${differences.simd}, ` +
         `Parallel Scalar=${differences.parallelScalar}, ` +
         `Parallel SIMD=${differences.parallelSIMD}`
       );
     }
 
-    if (delta > tolerance) throw new Error(`Implementations disagree (maximum channel difference ${delta}).`);
     return {
       image: new ImageData(simd.image, image.width, image.height),
       results: [

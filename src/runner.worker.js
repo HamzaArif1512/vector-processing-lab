@@ -14,7 +14,8 @@ self.onmessage = ({ data }) => {
     const { buffer, mode, technique, width, height, repetitions = 7 } = data;
     const incoming = new Uint8Array(buffer);
     const gaussian = technique === 'gaussian-scalar' || technique === 'gaussian-simd';
-    if (gaussian && (!Number.isInteger(width) || !Number.isInteger(height) || incoming.length !== width * height * 4)) {
+    const sobel = technique === 'sobel-scalar' || technique === 'sobel-simd';
+    if ((gaussian || sobel) && (!Number.isInteger(width) || !Number.isInteger(height) || incoming.length !== width * height * 4)) {
       throw new Error('Invalid Gaussian image dimensions');
     }
     const needed = incoming.byteLength;
@@ -29,18 +30,20 @@ self.onmessage = ({ data }) => {
 
     const srcOffset = (heapBase + 15) & ~15;
     const dstOffset = (srcOffset + needed + 15) & ~15;
-    const memoryNeeded = gaussian ? dstOffset + needed : srcOffset + needed;
+    const memoryNeeded = (gaussian || sobel) ? dstOffset + needed : srcOffset + needed;
     const pages = Math.ceil((memoryNeeded - wasm.memory.buffer.byteLength) / 65536);
     if (pages > 0) wasm.memory.grow(pages);
     const bytes = new Uint8Array(wasm.memory.buffer, srcOffset, needed);
-    const outputBytes = gaussian ? new Uint8Array(wasm.memory.buffer, dstOffset, needed) : bytes;
+    const outputBytes = (gaussian || sobel) ? new Uint8Array(wasm.memory.buffer, dstOffset, needed) : bytes;
     const fn = gaussian
       ? (technique === 'gaussian-simd' ? wasm.gaussian_blur_simd : wasm.gaussian_blur_scalar)
+      : sobel ? (technique === 'sobel-simd' ? wasm.sobel_simd : wasm.sobel_scalar)
       : (technique === 'simd' ? wasm.process_simd : wasm.process_scalar);
     if (typeof fn !== 'function') throw new Error(`Missing WASM export for ${technique}. Rebuild filters.wasm.`);
     const warmup = () => {
       bytes.set(incoming);
       if (gaussian) fn(srcOffset, dstOffset, width, height, mode.kernelSize, mode.sigma);
+      else if (sobel) fn(srcOffset, dstOffset, width, height);
       else fn(srcOffset, needed / 4, mode);
     };
     warmup();
@@ -49,6 +52,7 @@ self.onmessage = ({ data }) => {
       bytes.set(incoming);
       const start = performance.now();
       if (gaussian) fn(srcOffset, dstOffset, width, height, mode.kernelSize, mode.sigma);
+      else if (sobel) fn(srcOffset, dstOffset, width, height);
       else fn(srcOffset, needed / 4, mode);
       times.push(performance.now() - start);
     }

@@ -10,6 +10,8 @@ clang --target=wasm32 -O3 -ffp-contract=off -msimd128 -nostdlib \
   -Wl,--export=process_simd \
   -Wl,--export=gaussian_blur_scalar \
   -Wl,--export=gaussian_blur_simd \
+  -Wl,--export=sobel_scalar \
+  -Wl,--export=sobel_simd \
   -Wl,--export=__heap_base \
   -Wl,--export-memory \
   -Wl,--initial-memory=131072 \
